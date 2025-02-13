@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import sessionmaker, Session
 from contextlib import contextmanager
 from datetime import datetime
@@ -12,7 +12,26 @@ engine = create_engine('sqlite:///subdomains.db', echo=False)
 def init_database():
     """Initialize database and create tables"""
     from core.models import Base
+    logger.info("Initializing database...")
+    
+    # Log existing tables
+    inspector = inspect(engine)
+    existing_tables = inspector.get_table_names()
+    logger.info(f"Existing tables before init: {existing_tables}")
+    
+    # Create tables
     Base.metadata.create_all(engine)
+    
+    # Log final tables and schema
+    final_tables = inspector.get_table_names()
+    logger.info(f"Final tables after init: {final_tables}")
+    
+    # Log schema for each table
+    for table_name in final_tables:
+        columns = inspector.get_columns(table_name)
+        logger.info(f"\nSchema for {table_name}:")
+        for column in columns:
+            logger.info(f"  {column['name']}: {column['type']}")
 
 # Create session factory
 SessionFactory = sessionmaker(bind=engine)
@@ -29,7 +48,29 @@ class DatabaseSession:
     def session(self) -> Session:
         if not self._session:
             self._session = SessionFactory()
+            logger.info("Created new database session")
+            logger.info(f"Session ID: {id(self._session)}")
+            logger.info(f"Session valid: {self._session.is_active}")
         return self._session
+
+    @property
+    def is_active(self) -> bool:
+        """Check if session is active and valid"""
+        return self._session is not None and self._session.is_active
+
+    def inspect_tables(self):
+        """Log current state of database tables"""
+        inspector = inspect(engine)
+        tables = inspector.get_table_names()
+        logger.info(f"Current database tables: {tables}")
+        for table in tables:
+            count = self.session.execute(f"SELECT COUNT(*) FROM {table}").scalar()
+            logger.info(f"Table {table} has {count} rows")
+            if table == 'subdomains':
+                rows = self.session.execute("SELECT id, domain, is_alive, last_checked FROM subdomains").fetchall()
+                logger.info("\nSubdomains table contents:")
+                for row in rows:
+                    logger.info(f"ID: {row[0]}, Domain: {row[1]}, Alive: {row[2]}, Last Checked: {row[3]}")
 
     def close(self):
         """Closes the current session if it exists"""

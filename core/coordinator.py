@@ -6,6 +6,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from discovery.scanner import SubdomainDiscovery
+from discovery.utils import clean_target_url
 from crawling.service import CrawlingService
 from core.models import Subdomain, Endpoint, JavaScript
 from infrastrucutre.database import DatabaseSession
@@ -17,7 +18,7 @@ class ScanCoordinator:
     subdomain discovery and crawling until completion.
     """
     def __init__(self, target: str, db_session: Optional[DatabaseSession] = None):
-        self.target = target
+        self.target = clean_target_url(target)  # Clean target URL for database queries
         self.logger = logging.getLogger(__name__)
         
         # Track scan progress
@@ -60,41 +61,30 @@ class ScanCoordinator:
                     # Create task for the entire scan operation with session
                     self.logger.info("Starting scan operation...")
                     self._db_session = session  # Set session for discovery phase
-                    scan_task = asyncio.create_task(self._run_scan(session))  # Pass session to _run_scan
-                    result = await asyncio.wait_for(scan_task, timeout=timeout)
-                    return result  # Return the result from _run_scan directly
+                    result = await asyncio.wait_for(self._run_scan(session), timeout=timeout)
+                    return result
                 except asyncio.CancelledError:
                     self.logger.warning("=" * 60)
                     self.logger.warning("Scan cancelled by user")
                     self.logger.warning("Transitioning to crawling phase for discovered subdomains...")
                     self.logger.warning("=" * 60)
                     
-                    # Query for any discovered live subdomains
+                    # Query for any discovered subdomains
                     try:
-                        total_subdomains = session.query(Subdomain).filter(
-                            Subdomain.domain.like(f'%.{self.target}')
-                        ).count()
+                        new_active_subdomains = session.query(Subdomain).all()
+                        self.logger.info(f"Found domains: {[sub.domain for sub in new_active_subdomains]}")
                         
-                        live_subdomains = session.query(Subdomain).filter(
-                            Subdomain.domain.like(f'%.{self.target}'),
-                            Subdomain.is_alive == True
-                        ).all()
+                        new_count = len(new_active_subdomains)
+                        self.logger.info(f"Found {new_count} new active subdomains to crawl")
                         
-                        self.total_subdomains = total_subdomains
-                        live_count = len(live_subdomains)
-                        
-                        self.logger.info(f"Found {total_subdomains} total subdomains")
-                        self.logger.info(f"Found {live_count} live subdomains to crawl ({live_count/total_subdomains*100:.1f}% of total)")
-                        
-                        # Always proceed with crawling phase
-                        self.logger.info("=" * 60)
-                        self.logger.info("Starting crawling phase for discovered live subdomains")
-                        self.logger.info("=" * 60)
-                        if live_count == 0:
-                            self.logger.warning("No live subdomains found to crawl")
-                            self.logger.info("Proceeding with crawl phase anyway...")
-                        await self._crawl_subdomains(live_subdomains, session=session)
-                        self.crawled_subdomains = live_count
+                        if new_count > 0:
+                            self.logger.info("=" * 60)
+                            self.logger.info("Starting crawling phase for new active subdomains")
+                            self.logger.info("=" * 60)
+                            await self._crawl_subdomains(new_active_subdomains, session=session)
+                            self.crawled_subdomains = new_count
+                        else:
+                            self.logger.info("No new active subdomains to crawl")
                     except Exception as e:
                         self.logger.error(f"Error during post-cancellation crawling: {str(e)}", exc_info=True)
                     return self._generate_scan_report(session)
@@ -109,61 +99,98 @@ class ScanCoordinator:
 
     async def _run_scan(self, session: DatabaseSession) -> Dict:
         """Internal method to run the scan with proper error handling"""
+        discoverer = None
+        crawler = None
+
         try:
             # Phase 1: Subdomain Discovery with timeout
             self.logger.info("Starting Phase 1: Subdomain Discovery")
             subdomains = []
             try:
-                subdomains = await asyncio.wait_for(
-                    self._discover_subdomains(),
-                    timeout=900  # 15 minute timeout for discovery
+                # Create discoverer with context manager
+                discoverer = SubdomainDiscovery(
+                    target=self.target,
+                    db_session=session,
+                    rate_limit=10
                 )
+                async with discoverer:
+                    subdomains = await asyncio.wait_for(
+                        discoverer.discover(include_bruteforce=False),
+                        timeout=900  # 15 minute timeout for discovery
+                    )
                 self.total_subdomains = len(subdomains)
                 self.logger.info(f"Phase 1 Complete: Found {self.total_subdomains} total subdomains")
             except (asyncio.TimeoutError, asyncio.CancelledError) as e:
                 self.logger.warning("Subdomain discovery interrupted. Proceeding to crawl any discovered subdomains...")
-                # Query database for any subdomains that were saved before interruption
+                # Query database for all subdomains (including base domain)
                 subdomains = session.query(Subdomain).filter(
-                    Subdomain.domain.like(f'%.{self.target}')
+                    (Subdomain.domain == self.target) | (Subdomain.domain.like(f'%.{self.target}'))
                 ).all()
                 self.total_subdomains = len(subdomains)
-                self.logger.info(f"Found {self.total_subdomains} subdomains in database")
+                self.logger.info(f"Found {self.total_subdomains} total subdomains in database")
+
+            # Get only new and active subdomains (including base domain)
+
+            
+            # Ensure session is fresh
+            if not session.is_active:
+                self.logger.warning("Session not active, creating new session")
+                session = DatabaseSession()
+                self._db_session = session
+            
+            # Inspect database tables
+            session.inspect_tables()
+            
+            query = session.query(Subdomain).filter(
+                Subdomain.is_alive == True,
+                Subdomain.last_checked == None,
+                (Subdomain.domain == self.target) | (Subdomain.domain.like(f'%.{self.target}'))
+            )
+            self.logger.info(f"Query SQL: {query}")
+            
+            try:
+                new_active_subdomains = query.all()
+                self.logger.info(f"Query successful, found domains: {[sub.domain for sub in new_active_subdomains]}")
+            except Exception as e:
+                self.logger.error(f"Error executing query: {str(e)}")
+                self.logger.error(f"Error type: {type(e)}")
+                self.logger.error("Full traceback:", exc_info=True)
+                raise
 
             # Phase 2: Crawling with timeout
             self.logger.info("Starting Phase 2: Crawling")
-            live_subdomains = [sub for sub in subdomains if sub.is_alive]
-            live_count = len(live_subdomains)
             
-            if live_count == 0:
-                self.logger.warning("No live subdomains found to crawl")
-                self.logger.info("Proceeding with crawl phase anyway...")
-            else:
-                self.logger.info(f"Found {live_count} live subdomains to crawl ({live_count/self.total_subdomains*100:.1f}% of total)")
+            if not new_active_subdomains:
+                self.logger.info("No new active subdomains to crawl")
+                return self._generate_scan_report(session)
             
-            # Always proceed with crawling phase
+            new_count = len(new_active_subdomains)
+            if self.total_subdomains > 0:
+                self.logger.info(f"Found {new_count} new active subdomains to crawl ({new_count/self.total_subdomains*100:.1f}% of total)")
+            
             self.logger.info("=" * 60)
             self.logger.info("STARTING CRAWLING PHASE")
             self.logger.info("-" * 60)
             self.logger.info(f"Target: {self.target}")
-            self.logger.info(f"Live subdomains to crawl: {live_count}")
-            if live_count > 0:
-                self.logger.info(f"Subdomain IDs: {[sub.id for sub in live_subdomains]}")
+            self.logger.info(f"New active subdomains to crawl: {new_count}")
+            self.logger.info(f"Subdomain IDs: {[sub.id for sub in new_active_subdomains]}")
             self.logger.info("=" * 60)
             
             try:
-                # Initialize crawling service with our session
+                # Initialize crawling service with context manager
                 crawler = CrawlingService(session)
-                self.logger.info("Initialized CrawlingService")
-                
-                # Start the crawl
-                self.logger.info("Initiating crawl operation...")
-                await asyncio.wait_for(
-                    crawler.crawl_specific_targets([sub.id for sub in live_subdomains]),
-                    timeout=1800  # 30 minute timeout for crawling
-                )
+                async with crawler:
+                    self.logger.info("Initialized CrawlingService")
+                    
+                    # Start the crawl
+                    self.logger.info("Initiating crawl operation...")
+                    await asyncio.wait_for(
+                        crawler.crawl_specific_targets([sub.id for sub in new_active_subdomains]),
+                        timeout=1800  # 30 minute timeout for crawling
+                    )
                 
                 # Update progress
-                self.crawled_subdomains = live_count
+                self.crawled_subdomains = new_count
                 self.logger.info("=" * 60)
                 self.logger.info("CRAWLING PHASE COMPLETE")
                 self.logger.info("-" * 60)
@@ -215,20 +242,21 @@ class ScanCoordinator:
         )
         
         try:
-            subdomains = await discoverer.discover(include_bruteforce=False)
-            self.logger.info(f"Subdomain discovery complete. Found {len(subdomains)} subdomains")
-            
-            # Query the saved subdomains from database to ensure we have the model instances
-            subdomain_domains = [s['domain'] for s in subdomains]
-            db_subdomains = self._db_session.query(Subdomain).filter(
-                Subdomain.domain.in_(subdomain_domains)
-            ).all()
-            
-            if len(db_subdomains) != len(subdomains):
-                self.logger.warning(f"Found {len(subdomains)} subdomains but only {len(db_subdomains)} were saved to database")
-            
-            return db_subdomains
-            
+            async with discoverer:
+                subdomains = await discoverer.discover(include_bruteforce=False)
+                self.logger.info(f"Subdomain discovery complete. Found {len(subdomains)} subdomains")
+                
+                # Query the saved subdomains from database to ensure we have the model instances
+                subdomain_domains = [s['domain'] for s in subdomains]
+                db_subdomains = self._db_session.query(Subdomain).filter(
+                    Subdomain.domain.in_(subdomain_domains)
+                ).all()
+                
+                if len(db_subdomains) != len(subdomains):
+                    self.logger.warning(f"Found {len(subdomains)} subdomains but only {len(db_subdomains)} were saved to database")
+                
+                return db_subdomains
+                
         except Exception as e:
             self.logger.error(f"Error during subdomain discovery: {str(e)}", exc_info=True)
             raise
@@ -256,19 +284,7 @@ class ScanCoordinator:
         if session:
             # Use provided session directly
             crawler = CrawlingService(session)
-            subdomain_ids = [sub.id for sub in subdomains]
-            self.logger.info(f"Starting crawl for {len(subdomain_ids)} subdomain IDs")
-            
-            try:
-                await crawler.crawl_specific_targets(subdomain_ids)
-                self.logger.info("Crawling phase complete")
-            except Exception as e:
-                self.logger.error(f"Error during crawling phase: {str(e)}", exc_info=True)
-                raise
-        else:
-            # Create new session if none provided
-            async with self._db_context() as current_session:
-                crawler = CrawlingService(current_session)
+            async with crawler:
                 subdomain_ids = [sub.id for sub in subdomains]
                 self.logger.info(f"Starting crawl for {len(subdomain_ids)} subdomain IDs")
                 
@@ -278,6 +294,20 @@ class ScanCoordinator:
                 except Exception as e:
                     self.logger.error(f"Error during crawling phase: {str(e)}", exc_info=True)
                     raise
+        else:
+            # Create new session if none provided
+            async with self._db_context() as current_session:
+                crawler = CrawlingService(current_session)
+                async with crawler:
+                    subdomain_ids = [sub.id for sub in subdomains]
+                    self.logger.info(f"Starting crawl for {len(subdomain_ids)} subdomain IDs")
+                    
+                    try:
+                        await crawler.crawl_specific_targets(subdomain_ids)
+                        self.logger.info("Crawling phase complete")
+                    except Exception as e:
+                        self.logger.error(f"Error during crawling phase: {str(e)}", exc_info=True)
+                        raise
 
     def _generate_scan_report(self, session: DatabaseSession, error: Optional[str] = None) -> Dict:
         """
@@ -327,9 +357,11 @@ JavaScript Files: {js_files}
     def _count_endpoints(self, session: DatabaseSession) -> int:
         """Counts total endpoints discovered during the scan"""
         return session.query(Endpoint).join(Subdomain).filter(
-            Subdomain.domain.like(f'%.{self.target}')).count()
+            (Subdomain.domain == self.target) | (Subdomain.domain.like(f'%.{self.target}'))
+        ).count()
 
     def _count_js_files(self, session: DatabaseSession) -> int:
         """Counts total JavaScript files discovered during the scan"""
         return session.query(JavaScript).join(Subdomain).filter(
-            Subdomain.domain.like(f'%.{self.target}')).count()
+            (Subdomain.domain == self.target) | (Subdomain.domain.like(f'%.{self.target}'))
+        ).count()

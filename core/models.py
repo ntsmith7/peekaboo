@@ -12,11 +12,10 @@ from sqlalchemy import (
     String,
     ForeignKey,
 )
-from sqlalchemy.orm import DeclarativeBase
 
+from sqlalchemy.ext.declarative import declarative_base
 
-class Base(DeclarativeBase):
-    pass
+Base = declarative_base()
 
 
 class SubdomainSource(enum.Enum):
@@ -37,7 +36,7 @@ class Subdomain(Base):
     ip_addresses = Column(JSON)
     http_status = Column(Integer)
     additional_info = Column(JSON)
-    last_checked = Column(DateTime, default=datetime.utcnow)
+    last_checked = Column(DateTime, nullable=True)
     is_takeover_candidate = Column(Boolean, default=False)
 
 

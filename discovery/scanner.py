@@ -11,8 +11,8 @@ from datetime import datetime
 from urllib.parse import urlparse
 
 from .utils import clean_target_url
-from infrastrucutre.logging_config import get_component_logger
 from infrastrucutre.database import DatabaseSession
+from infrastrucutre.logging_config import get_logger
 from core.models import Subdomain
 
 
@@ -21,21 +21,58 @@ class SubdomainDiscovery:
     Unified class for subdomain discovery combining passive and active techniques.
     """
     def __init__(self, target: str, db_session: DatabaseSession, rate_limit=5):
+        self.logger = get_logger(__name__)
         self.session = db_session
         self.id = uuid.uuid4()
-        self.logger = get_component_logger('subdomain_discovery', include_id=True)
         self.discovered = set()
         self.results = []  # Store results in memory
         self._http_session = None
-        self.resolver = aiodns.DNSResolver()
+        self.resolver = None
         self.rate_limit = rate_limit
         self.semaphore = asyncio.Semaphore(rate_limit)
-        self._http_session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=30),
-            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        )
         self.target = clean_target_url(target)
+        self._cleanup_lock = asyncio.Lock()
+        self._is_closed = False
         self.logger.info(f"Initialized SubdomainDiscovery for target: {self.target} with rate limit: {rate_limit}")
+
+    async def __aenter__(self):
+        """Async context manager entry"""
+        await self.setup()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit"""
+        await self.cleanup()
+
+    async def setup(self):
+        """Initialize async resources"""
+        if not self._http_session:
+            self._http_session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=30),
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+            )
+        if not self.resolver:
+            self.resolver = aiodns.DNSResolver()
+        self._is_closed = False
+
+    async def cleanup(self):
+        """Cleanup async resources"""
+        async with self._cleanup_lock:
+            if self._is_closed:
+                return
+
+            self.logger.debug("Starting SubdomainDiscovery cleanup")
+            try:
+                if self._http_session:
+                    await asyncio.wait_for(self._http_session.close(), timeout=5)
+                self._http_session = None
+                self.resolver = None
+                self._is_closed = True
+                self.logger.debug("SubdomainDiscovery cleanup completed")
+            except asyncio.TimeoutError:
+                self.logger.error("Timeout during SubdomainDiscovery cleanup")
+            except Exception as e:
+                self.logger.error(f"Error during SubdomainDiscovery cleanup: {str(e)}")
 
     async def resolve_domain(self, domain: str) -> list:
         """Resolve domain to IP addresses"""
@@ -53,10 +90,22 @@ class SubdomainDiscovery:
         """
         Main discovery method combining passive and active techniques.
         """
+        if self._is_closed:
+            raise RuntimeError("SubdomainDiscovery is closed")
+
+        # Reset collections at the start of each scan
+        self.discovered = set()
+        self.results = []
+        
         self.logger.info(f"Starting subdomain discovery for: {self.target}")
         start_time = datetime.utcnow()
 
         try:
+            await self.setup()  # Ensure resources are initialized
+
+            # Always check base domain first
+            await self._store_subdomain(self.target, "PASSIVE")
+            
             # Run passive enumeration using subfinder command
             await self._passive_enumeration()
 
@@ -73,16 +122,15 @@ class SubdomainDiscovery:
             )
             return self.results
 
+        except asyncio.CancelledError:
+            self.logger.warning("Discovery cancelled")
+            raise
         except Exception as e:
             self.logger.error(
                 f"Error during subdomain discovery: {str(e)}\n"
                 f"Traceback: {traceback.format_exc()}"
             )
             raise
-        finally:
-            if self._http_session:
-                await self._http_session.close()
-                self.logger.debug("Closed HTTP session")
 
     async def _passive_enumeration(self):
         """
@@ -204,69 +252,77 @@ class SubdomainDiscovery:
             return None, None
 
     async def _store_subdomain(self, domain: str, source: str):
+        """Store subdomain information in memory and database."""
         if domain in self.discovered:
             self.logger.debug(f"Skipping already discovered domain: {domain}")
             return
 
         self.discovered.add(domain)
-        self.logger.info(f"Found new subdomain: {domain} from source: {source}")
+        validation_start = datetime.utcnow()
 
         try:
-            self.logger.info(f"Starting validation checks for {domain}")
-            validation_start = datetime.utcnow()
+            # Perform validation checks
             is_takeover_candidate = await self._check_takeover(domain)
-            status, content = await self._probe_http(domain)
+            status, _ = await self._probe_http(domain)
             ip_addresses = await self.resolve_domain(domain)
+            is_alive = bool(ip_addresses)
+            current_time = datetime.utcnow()
 
-            # Prepare subdomain data
-            subdomain_data = {
+            # Store result in memory
+            self.results.append({
                 'domain': domain,
                 'source': source,
                 'ip_addresses': ip_addresses,
-                'is_alive': bool(ip_addresses),
+                'is_alive': is_alive,
                 'is_takeover_candidate': is_takeover_candidate,
                 'http_status': status,
-                'discovery_time': datetime.utcnow().isoformat(),
-                'last_checked': datetime.utcnow().isoformat()
-            }
+                'discovery_time': current_time.isoformat(),
+                'last_checked': current_time.isoformat()
+            })
+
+            # Check if subdomain already exists
+            existing = self.session.query(Subdomain).filter(Subdomain.domain == domain).first()
             
-            # Store in memory and database
-            self.results.append(subdomain_data)
-            
-            # Create Subdomain model instance
-            subdomain = Subdomain(
-                domain=domain,
-                source=source,
-                ip_addresses=ip_addresses,
-                is_alive=bool(ip_addresses),
-                is_takeover_candidate=is_takeover_candidate,
-                http_status=status,
-                discovery_time=datetime.utcnow(),
-                last_checked=datetime.utcnow()
-            )
-            
-            # Save to database using provided session and commit immediately
-            try:
+            if existing:
+                # Update existing record
+                existing.source = source
+                existing.ip_addresses = ip_addresses
+                existing.is_alive = is_alive
+                existing.is_takeover_candidate = is_takeover_candidate
+                existing.http_status = status
+                existing.discovery_time = current_time
+                existing.last_checked = None  # Reset to trigger crawl
+            else:
+                # Create new record
+                subdomain = Subdomain(
+                    domain=domain,
+                    source=source,
+                    ip_addresses=ip_addresses,
+                    is_alive=is_alive,
+                    is_takeover_candidate=is_takeover_candidate,
+                    http_status=status,
+                    discovery_time=current_time,
+                    last_checked=None  # Reset to trigger crawl
+                )
                 self.session.add(subdomain)
+            
+            try:
                 self.session.commit()
-                self.logger.info(f"Successfully saved {domain} to database")
             except Exception as e:
-                self.logger.error(f"Failed to save {domain} to database: {str(e)}")
+                self.logger.error(f"Database error for {domain}: {str(e)}")
                 self.session.rollback()
                 raise
-            
+
+            # Log validation results
             validation_duration = (datetime.utcnow() - validation_start).total_seconds()
-            self.logger.info(f"""
-Validation complete for {domain}:
-- Duration: {validation_duration:.1f} seconds
-- IP Addresses: {len(ip_addresses)}
-- HTTP Status: {status}
-- Takeover Candidate: {is_takeover_candidate}
-- Status: {'Live' if bool(ip_addresses) else 'Dead'}
-            """.strip())
+            self.logger.info(
+                f"Processed {domain} in {validation_duration:.1f}s: "
+                f"IPs: {len(ip_addresses)}, "
+                f"HTTP: {status}, "
+                f"Takeover: {is_takeover_candidate}, "
+                f"Status: {'Live' if is_alive else 'Dead'}"
+            )
 
         except Exception as e:
-            self.logger.error(
-                f"Error processing {domain}: {str(e)}\n"
-                f"Traceback: {traceback.format_exc()}"
-            )
+            self.logger.error(f"Error processing {domain}: {str(e)}")
+            raise
