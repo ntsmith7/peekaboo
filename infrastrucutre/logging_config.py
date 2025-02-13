@@ -1,12 +1,9 @@
 import logging
-import logging.handlers
 import os
-from datetime import datetime
 
 def setup_logging(log_level=logging.INFO):
     """
-    Sets up logging configuration for the application.
-    Creates rotating file handlers for different log files.
+    Sets up simplified logging configuration with a single file handler.
     """
     # Create logs directory if it doesn't exist
     if not os.path.exists('logs'):
@@ -16,33 +13,16 @@ def setup_logging(log_level=logging.INFO):
     root_logger = logging.getLogger()
     root_logger.setLevel(log_level)
 
-    # Common log format
-    formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
+    # Simple log format
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 
-    # Setup rotating file handler for subdomain finder
-    subdomain_handler = logging.handlers.RotatingFileHandler(
-        'logs/subdomain_finder.log',
-        maxBytes=10*1024*1024,  # 10MB
-        backupCount=3
-    )
-    subdomain_handler.setFormatter(formatter)
-    subdomain_handler.setLevel(log_level)
-    root_logger.addHandler(subdomain_handler)
+    # Single file handler
+    file_handler = logging.FileHandler('logs/scanner.log')
+    file_handler.setFormatter(formatter)
+    file_handler.setLevel(log_level)
+    root_logger.addHandler(file_handler)
 
-    # Setup daily rotating handler for scanner
-    scanner_handler = logging.handlers.TimedRotatingFileHandler(
-        f'logs/scanner_{datetime.now().strftime("%Y%m%d")}.log',
-        when='midnight',
-        interval=1,
-        backupCount=7
-    )
-    scanner_handler.setFormatter(formatter)
-    scanner_handler.setLevel(log_level)
-    root_logger.addHandler(scanner_handler)
-
-    # Setup console handler
+    # Console handler for immediate feedback
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(formatter)
     console_handler.setLevel(log_level)
@@ -55,25 +35,5 @@ def setup_logging(log_level=logging.INFO):
     return root_logger
 
 def get_logger(name: str) -> logging.Logger:
-    """
-    Gets a logger instance with the specified name.
-    Ensures it inherits the root logger's configuration.
-    """
+    """Gets a logger instance with the specified name."""
     return logging.getLogger(name)
-
-def get_component_logger(name: str, include_id: bool = False) -> logging.Logger:
-    """
-    Gets a logger instance for a component, optionally including an ID in the name.
-    
-    Args:
-        name: Base name for the logger
-        include_id: Whether to include a unique ID in the logger name
-        
-    Returns:
-        Logger instance with the specified configuration
-    """
-    if include_id:
-        import uuid
-        component_id = str(uuid.uuid4())[:8]
-        name = f"{name}[{component_id}]"
-    return get_logger(name)

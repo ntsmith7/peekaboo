@@ -3,6 +3,7 @@ import asyncio
 import logging
 import time
 import sys
+import signal
 import argparse
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -11,6 +12,14 @@ from pathlib import Path
 # Import and setup logging first
 from infrastrucutre.logging_config import setup_logging
 logger = setup_logging(logging.INFO)
+
+def flush_logging_handlers():
+    """Ensure all logging handlers are flushed"""
+    for handler in logger.handlers:
+        try:
+            handler.flush()
+        except Exception as e:
+            print(f"Error flushing log handler: {str(e)}", file=sys.stderr)
 
 def check_dependencies():
     """Check if all required dependencies are installed"""
@@ -142,16 +151,29 @@ def run():
         exit_code = 0
         
         try:
+            # Set up signal handlers
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(sig, lambda s=sig: handle_signal(loop, main_task, s))
+            
             exit_code = loop.run_until_complete(main_task)
         except KeyboardInterrupt:
             logger.info("Received shutdown signal, stopping gracefully...")
-            # Cancel the main task and wait for it to complete
-            main_task.cancel()
-            try:
-                exit_code = loop.run_until_complete(main_task)
-            except asyncio.CancelledError:
-                exit_code = 0
+            exit_code = handle_shutdown(loop, main_task)
         finally:
+            # Remove signal handlers
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.remove_signal_handler(sig)
+            
+            # Ensure all tasks are cancelled
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            
+            # Run loop until all tasks complete
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            
+            # Close the loop
             loop.close()
             
         sys.exit(exit_code)
@@ -159,6 +181,31 @@ def run():
     except Exception as e:
         logger.error(f"Fatal error: {str(e)}", exc_info=True)
         sys.exit(1)
+
+def handle_signal(loop: asyncio.AbstractEventLoop, main_task: asyncio.Task, sig: int):
+    """Handle received signals"""
+    logger.info(f"Received signal {sig}, initiating graceful shutdown...")
+    handle_shutdown(loop, main_task)
+
+def handle_shutdown(loop: asyncio.AbstractEventLoop, main_task: asyncio.Task) -> int:
+    """Handle graceful shutdown of the application"""
+    try:
+        # Cancel the main task
+        main_task.cancel()
+        
+        # Wait for cancellation to complete
+        try:
+            loop.run_until_complete(main_task)
+        except asyncio.CancelledError:
+            pass
+        
+        # Ensure logs are flushed
+        flush_logging_handlers()
+        return 0
+    except Exception as e:
+        logger.error(f"Error during shutdown: {str(e)}")
+        flush_logging_handlers()
+        return 1
 
 if __name__ == "__main__":
     run()
