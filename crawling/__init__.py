@@ -1,3 +1,3 @@
-from .service import CrawlingService
-
-__all__ = ['CrawlingService']
+"""
+Crawling package for web crawling and endpoint discovery.
+"""

@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker, Session
 from contextlib import contextmanager
 from datetime import datetime
@@ -14,24 +14,9 @@ def init_database():
     from core.models import Base
     logger.info("Initializing database...")
     
-    # Log existing tables
-    inspector = inspect(engine)
-    existing_tables = inspector.get_table_names()
-    logger.info(f"Existing tables before init: {existing_tables}")
-    
-    # Create tables
     Base.metadata.create_all(engine)
     
-    # Log final tables and schema
-    final_tables = inspector.get_table_names()
-    logger.info(f"Final tables after init: {final_tables}")
-    
-    # Log schema for each table
-    for table_name in final_tables:
-        columns = inspector.get_columns(table_name)
-        logger.info(f"\nSchema for {table_name}:")
-        for column in columns:
-            logger.info(f"  {column['name']}: {column['type']}")
+
 
 # Create session factory
 SessionFactory = sessionmaker(bind=engine)
@@ -58,19 +43,6 @@ class DatabaseSession:
         """Check if session is active and valid"""
         return self._session is not None and self._session.is_active
 
-    def inspect_tables(self):
-        """Log current state of database tables"""
-        inspector = inspect(engine)
-        tables = inspector.get_table_names()
-        logger.info(f"Current database tables: {tables}")
-        for table in tables:
-            count = self.session.execute(f"SELECT COUNT(*) FROM {table}").scalar()
-            logger.info(f"Table {table} has {count} rows")
-            if table == 'subdomains':
-                rows = self.session.execute("SELECT id, domain, is_alive, last_checked FROM subdomains").fetchall()
-                logger.info("\nSubdomains table contents:")
-                for row in rows:
-                    logger.info(f"ID: {row[0]}, Domain: {row[1]}, Alive: {row[2]}, Last Checked: {row[3]}")
 
     def close(self):
         """Closes the current session if it exists"""
@@ -114,6 +86,16 @@ class DatabaseSession:
     def bulk_save_objects(self, objects, return_defaults=False, update_changed_only=True):
         """Convenience method to perform bulk save operations"""
         try:
+            # Log details about objects being saved
+            for obj in objects:
+                logger.debug(f"Saving object of type {type(obj).__name__}")
+                for column in obj.__table__.columns:
+                    value = getattr(obj, column.name)
+                    if value is None and not column.nullable:
+                        logger.error(f"Required column {column.name} is None for {type(obj).__name__}")
+                        raise ValueError(f"Required column {column.name} cannot be None")
+                    logger.debug(f"  {column.name}: {value}")
+
             self.session.bulk_save_objects(objects, return_defaults=return_defaults, update_changed_only=update_changed_only)
         except Exception as e:
             logger.error(f"Error performing bulk save: {str(e)}")

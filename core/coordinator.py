@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 
 from discovery.scanner import SubdomainDiscovery
 from discovery.utils import clean_target_url
-from crawling.service import CrawlingService
+from crawling import service
 from core.models import Subdomain, Endpoint, JavaScript
 from infrastrucutre.database import DatabaseSession
 
@@ -178,7 +178,7 @@ class ScanCoordinator:
             
             try:
                 # Initialize crawling service with context manager
-                crawler = CrawlingService(session)
+                crawler = service.CrawlingService(session)
                 async with crawler:
                     self.logger.info("Initialized CrawlingService")
                     
@@ -283,7 +283,7 @@ class ScanCoordinator:
         
         if session:
             # Use provided session directly
-            crawler = CrawlingService(session)
+            crawler = service.CrawlingService(session)
             async with crawler:
                 subdomain_ids = [sub.id for sub in subdomains]
                 self.logger.info(f"Starting crawl for {len(subdomain_ids)} subdomain IDs")
@@ -297,7 +297,7 @@ class ScanCoordinator:
         else:
             # Create new session if none provided
             async with self._db_context() as current_session:
-                crawler = CrawlingService(current_session)
+                crawler = service.CrawlingService(current_session)
                 async with crawler:
                     subdomain_ids = [sub.id for sub in subdomains]
                     self.logger.info(f"Starting crawl for {len(subdomain_ids)} subdomain IDs")

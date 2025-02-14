@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import List, Optional, Dict, TYPE_CHECKING
+from urllib.parse import urlparse, parse_qsl
 
 if TYPE_CHECKING:
     from core.models import KatanaResult
@@ -122,24 +123,66 @@ class CrawlingService:
                 self.logger.error(f"Error crawling {subdomain.domain}: {str(e)}")
                 raise
 
+    def _parse_url_components(self, url: str) -> Dict:
+        """Parse URL into components for storage"""
+        parsed = urlparse(url)
+        path_parts = [p for p in parsed.path.split('/') if p]
+        
+        return {
+            'full_url': url,
+            'domain': parsed.netloc,
+            'path_segments': path_parts,
+            'endpoint_type': path_parts[0] if path_parts else None,
+            'resource_id': path_parts[1] if len(path_parts) > 1 else None
+        }
+
     def _create_endpoint_record(self, subdomain_id: int, result: 'KatanaResult') -> Endpoint:
         """Create an Endpoint record from a KatanaResult"""
-        return Endpoint(
+        url_components = self._parse_url_components(result.url)
+        self.logger.debug(f"Creating endpoint record for URL: {result.url}")
+        
+        # Ensure required fields have values
+        if not result.url:
+            raise ValueError("URL cannot be empty")
+        if not url_components['domain']:
+            raise ValueError("Domain cannot be empty")
+            
+        # Convert path_segments to empty list if None
+        if url_components['path_segments'] is None:
+            url_components['path_segments'] = []
+            
+        # Ensure parameters is a dict
+        parameters = result.parameters if result.parameters else {}
+        
+        # Create endpoint with validated data
+        endpoint = Endpoint(
             subdomain_id=subdomain_id,
-            path=result.url,
-            method=result.method,
-            source=EndpointSource(result.source),
-            discovery_time=datetime.utcnow(),
+            **url_components,  # Unpacks full_url, domain, path_segments, etc.
+            
+            # Discovery context
+            source_page=result.request.get('source', ''),
+            discovery_tag=result.request.get('tag', ''),
+            discovery_attribute=result.request.get('attribute', ''),
+            discovery_time=datetime.fromisoformat(result.timestamp),
+            
+            # Request/Response data
+            method=result.method or 'GET',
             content_type=result.content_type,
             status_code=result.status_code,
             response_size=result.response_size,
-            parameters=result.parameters,
+            parameters=parameters,
             is_authenticated=False,
             additional_info={
-                'headers': result.headers,
+                'headers': result.headers or {},
                 'response_body': result.response_body
             }
         )
+        
+        # Validate required fields
+        if not endpoint.full_url or not endpoint.domain:
+            raise ValueError(f"Missing required fields for endpoint: {endpoint.__dict__}")
+            
+        return endpoint
 
     def _create_js_record(self, subdomain_id: int, result: 'KatanaResult') -> JavaScript:
         """Create a JavaScript record from a KatanaResult"""
@@ -165,13 +208,35 @@ class CrawlingService:
                 else:
                     endpoints.append(self._create_endpoint_record(subdomain_id, result))
             
+            # Log what we're about to save
             if endpoints:
-                self.session.bulk_save_objects(endpoints)
+                self.logger.info(f"Saving {len(endpoints)} endpoints")
+                for endpoint in endpoints:
+                    self.logger.debug(f"Endpoint: {endpoint.full_url}")
+                try:
+                    self.session.bulk_save_objects(endpoints)
+                except Exception as e:
+                    self.logger.error(f"Failed to save endpoints: {str(e)}")
+                    raise
+
             if js_files:
-                self.session.bulk_save_objects(js_files)
-                
-            self.session.commit()
-            
+                self.logger.info(f"Saving {len(js_files)} JavaScript files")
+                for js in js_files:
+                    self.logger.debug(f"JavaScript: {js.url}")
+                try:
+                    self.session.bulk_save_objects(js_files)
+                except Exception as e:
+                    self.logger.error(f"Failed to save JavaScript files: {str(e)}")
+                    raise
+
+            try:
+                self.session.commit()
+                self.logger.info("Successfully committed all changes to database")
+            except Exception as e:
+                self.logger.error(f"Failed to commit changes: {str(e)}")
+                self.session.rollback()
+                raise
+
         except Exception as e:
             self.logger.error(f"Error processing results: {str(e)}")
             self.session.rollback()
