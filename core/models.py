@@ -50,16 +50,28 @@ class Endpoint(Base):
     __tablename__ = 'endpoints'
     id = Column(Integer, primary_key=True)
     subdomain_id = Column(Integer, ForeignKey('subdomains.id'))
-    path = Column(String, nullable=False)
-    method = Column(String)
-    source = Column(Enum(EndpointSource))
+    
+    # URL Components
+    full_url = Column(String, nullable=False)  # Complete URL as found
+    domain = Column(String, nullable=False)    # e.g. 'www.coolblue.nl'
+    path_segments = Column(JSON)               # e.g. ['product', '947017', 'samsung-music-frame']
+    endpoint_type = Column(String)             # e.g. 'product'
+    resource_id = Column(String)               # e.g. '947017'
+    
+    # Discovery Context
+    source_page = Column(String)               # Where this URL was found
+    discovery_tag = Column(String)             # HTML element (e.g. 'a')
+    discovery_attribute = Column(String)       # Element attribute (e.g. 'href')
     discovery_time = Column(DateTime, default=datetime.utcnow)
-    content_type = Column(String)
+    
+    # Request/Response Data
+    method = Column(String)
     status_code = Column(Integer)
+    content_type = Column(String)
     response_size = Column(Integer)
-    parameters = Column(JSON)  # Stores discovered URL/form parameters
-    is_authenticated = Column(Boolean)  # Did we find this while authenticated?
-    additional_info = Column(JSON)  # For framework-specific details
+    parameters = Column(JSON)                  # Query/form parameters
+    is_authenticated = Column(Boolean)         # Found while authenticated?
+    additional_info = Column(JSON)             # Extra metadata
 
 class JavaScript(Base):
     __tablename__ = 'javascript_files'
@@ -76,12 +88,13 @@ class JavaScript(Base):
 @dataclass
 class KatanaResult:
     """Data class for storing Katana crawler results"""
-    url: str
-    method: str
-    status_code: Optional[int]
-    content_type: Optional[str]
-    response_size: Optional[int]
-    parameters: Dict
-    headers: Dict
-    response_body: Optional[str]
-    source: str
+    timestamp: str                # ISO format timestamp
+    request: Dict                 # Contains method, endpoint, tag, attribute, source
+    url: str                      # Full URL (added for compatibility)
+    method: str                   # HTTP method
+    status_code: Optional[int]    # Response status
+    content_type: Optional[str]   # Response content type
+    response_size: Optional[int]  # Response size in bytes
+    parameters: Dict              # URL/form parameters
+    headers: Dict                 # Response headers
+    response_body: Optional[str]  # Response content
