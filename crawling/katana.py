@@ -1,8 +1,9 @@
 import asyncio
 import json
 import os
+from datetime import datetime
 from typing import List, Dict, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qsl
 import logging
 import shutil
 from pathlib import Path
@@ -35,10 +36,10 @@ class KatanaCrawler:
                 self.logger.error(f"Katana binary is not executable: {self.katana_path}")
                 return False
             
-            # Try running version check
+            # Check version
             process = await asyncio.create_subprocess_exec(
                 self.katana_path,
-                "--version",  # Changed to --version as it's more standard
+                "-v",  # Try -v first
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
@@ -46,17 +47,26 @@ class KatanaCrawler:
             try:
                 stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
                 if process.returncode != 0:
-                    # Try -version if --version fails
+                    # Try --version if -v fails
                     process = await asyncio.create_subprocess_exec(
                         self.katana_path,
-                        "-version",
+                        "--version",
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE
                     )
                     stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
                     if process.returncode != 0:
-                        self.logger.error(f"Katana version check failed: {stderr.decode().strip()}")
-                        return False
+                        # Try -version if --version fails
+                        process = await asyncio.create_subprocess_exec(
+                            self.katana_path,
+                            "-version",
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE
+                        )
+                        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
+                        if process.returncode != 0:
+                            self.logger.error(f"Katana version check failed: {stderr.decode().strip()}")
+                            return False
             except asyncio.TimeoutError:
                 self.logger.error("Katana version check timed out")
                 return False
@@ -106,10 +116,7 @@ class KatanaCrawler:
         cmd = [
             self.katana_path,
             "-u", f"https://{domain}",
-            "-j",      # JSON output
-            "-silent", # Reduce noise
-            "-d", "5", # Reasonable depth
-            "-c", "10" # Reasonable concurrency
+            "-j"      # JSON output
         ]
         
         try:
@@ -194,13 +201,21 @@ class KatanaCrawler:
                 return []
             
             results = []
-            for line in stdout.decode().splitlines():
-                try:
-                    if line.strip():
-                        results.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-                    
+            stdout_lines = stdout.decode().splitlines()
+            self.logger.info(f"Raw katana output ({len(stdout_lines)} lines):")
+            for i, line in enumerate(stdout_lines):
+                if line.strip():
+                    self.logger.info(f"Line {i}: {line[:200]}...")  # Log first 200 chars of each line
+                    try:
+                        result = json.loads(line)
+                        if 'raw' in result:
+                            del result['raw']  # Remove raw field before processing
+                        results.append(result)
+                    except json.JSONDecodeError:
+                        self.logger.error(f"Failed to parse JSON from line {i}: {line[:200]}...")
+                        continue
+            
+            self.logger.info(f"Successfully parsed {len(results)} JSON results from katana output")
             return results
             
         except asyncio.TimeoutError:
@@ -212,22 +227,36 @@ class KatanaCrawler:
 
     def _parse_result(self, result: Dict, source: str) -> KatanaResult:
         """Parse raw katana result."""
-        parsed_url = urlparse(result.get('url', ''))
-        parameters = {
-            'query': parsed_url.query,
-            'form_data': result.get('form_data', {})
-        } if result.get('form_data') or parsed_url.query else {}
+        parsed_url = urlparse(result.get('endpoint', ''))
+        # self.logger.info(f"Parsing result for {result}")
+        
+        # Extract query parameters if present
+        parameters = {}
+        if parsed_url.query:
+            parameters['query'] = dict(parse_qsl(parsed_url.query))
+        if result.get('form_data'):
+            parameters['form_data'] = result.get('form_data')
+
+        # Construct the request context
+        request_data = {
+            'method': result.get('method', 'GET'),
+            'endpoint': result.get('endpoint', ''),
+            'tag': result.get('tag', ''),
+            'attribute': result.get('attribute', ''),
+            'source': result.get('source', '')
+        }
 
         return KatanaResult(
-            url=result.get('url', ''),
-            method=result.get('method', 'GET'),
+            timestamp=result.get('timestamp', datetime.utcnow().isoformat()),
+            request=request_data,
+            url=result.get('endpoint', ''),  # For compatibility
+            method=request_data['method'],
             status_code=result.get('status-code'),
             content_type=result.get('content-type'),
             response_size=result.get('response-size'),
             parameters=parameters,
             headers=result.get('headers', {}),
-            response_body=result.get('response', None),
-            source=source
+            response_body=result.get('response', None)
         )
 
     def _deduplicate_results(self, results: List[KatanaResult]) -> List[KatanaResult]:
@@ -240,5 +269,4 @@ class KatanaCrawler:
             if key not in seen:
                 seen.add(key)
                 unique_results.append(result)
-        
         return unique_results
