@@ -22,10 +22,7 @@ class KatanaCrawler:
         self._is_closed = False
         
     async def verify_installation(self) -> bool:
-        """
-        Verify katana installation by running version check.
-        Returns True if katana is properly installed and working.
-        """
+        """Verify katana installation by running version check."""
         try:
             # Verify binary exists and is executable
             katana_path = Path(self.katana_path)
@@ -36,43 +33,7 @@ class KatanaCrawler:
                 self.logger.error(f"Katana binary is not executable: {self.katana_path}")
                 return False
             
-            # Check version
-            process = await asyncio.create_subprocess_exec(
-                self.katana_path,
-                "-v",  # Try -v first
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            
-            try:
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
-                if process.returncode != 0:
-                    # Try --version if -v fails
-                    process = await asyncio.create_subprocess_exec(
-                        self.katana_path,
-                        "--version",
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE
-                    )
-                    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
-                    if process.returncode != 0:
-                        # Try -version if --version fails
-                        process = await asyncio.create_subprocess_exec(
-                            self.katana_path,
-                            "-version",
-                            stdout=asyncio.subprocess.PIPE,
-                            stderr=asyncio.subprocess.PIPE
-                        )
-                        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
-                        if process.returncode != 0:
-                            self.logger.error(f"Katana version check failed: {stderr.decode().strip()}")
-                            return False
-            except asyncio.TimeoutError:
-                self.logger.error("Katana version check timed out")
-                return False
-                
-            version = stdout.decode().strip()
-            self.logger.info(f"Found katana version: {version}")
+            # Simple existence check is sufficient since we already verified executable permissions
             return True
             
         except Exception as e:
@@ -87,12 +48,10 @@ class KatanaCrawler:
 
             try:
                 if self._current_process:
-                    self.logger.debug("Terminating running katana process")
+                    self._current_process.terminate()
                     try:
-                        self._current_process.terminate()
                         await asyncio.wait_for(self._current_process.wait(), timeout=5)
                     except asyncio.TimeoutError:
-                        self.logger.warning("Katana process did not terminate, killing it")
                         self._current_process.kill()
                     self._current_process = None
                 self._is_closed = True
@@ -101,7 +60,6 @@ class KatanaCrawler:
 
     async def crawl_all(self, target_url: str, timeout: int = 180) -> List[KatanaResult]:
         """Crawl target URL with simplified configuration."""
-        # Verify installation before crawling
         if not await self.verify_installation():
             self.logger.error("Katana installation verification failed")
             return []
@@ -111,162 +69,107 @@ class KatanaCrawler:
         else:
             domain = target_url
             
-        self.logger.info(f"Crawling {domain}")
-        
         cmd = [
             self.katana_path,
             "-u", f"https://{domain}",
-            "-j"      # JSON output
+            "-j"  # JSON output
         ]
         
         try:
-            results = await self._execute_command(cmd, timeout)
-            if not results:
+            stdout = await self._execute_command(cmd, timeout)
+            if not stdout:
                 return []
                 
-            processed_results = [self._parse_result(r, "crawler") for r in results]
-            return self._deduplicate_results(processed_results)
+            results = self._parse_json_lines(stdout)
+            return [self._parse_result(r) for r in results]
             
         except Exception as e:
             self.logger.error(f"Error crawling {domain}: {str(e)}")
             return []
 
-    async def _execute_command(self, cmd: List[str], timeout: int = 60) -> List[Dict]:
-        """Execute katana command and parse results."""
+    async def _execute_command(self, cmd: List[str], timeout: int = 60) -> Optional[str]:
+        """Execute katana command and return stdout."""
         if self._is_closed:
             raise RuntimeError("KatanaCrawler is closed")
 
+        process = None
         try:
-            # Verify katana binary exists and is executable
-            katana_path = Path(self.katana_path)
-            if not katana_path.exists():
-                self.logger.error(f"Katana binary not found at: {self.katana_path}")
-                return []
-            if not os.access(self.katana_path, os.X_OK):
-                self.logger.error(f"Katana binary is not executable: {self.katana_path}")
-                return []
-                
-            # Log the exact command being executed
-            cmd_str = ' '.join(cmd)
-            self.logger.info(f"Executing katana command: {cmd_str}")
-            
-            self._current_process = await asyncio.create_subprocess_exec(
+            process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
             
-            if not self._current_process:
-                self.logger.error("Failed to create katana process")
-                return []
-                
-            self.logger.info(f"Started katana process with PID: {self._current_process.pid}")
+            self._current_process = process
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=timeout
+            )
             
-            process = None
-            try:
-                process = self._current_process  # Keep reference
-                stdout, stderr = await asyncio.wait_for(
-                    process.communicate(),
-                    timeout=timeout
-                )
-                returncode = process.returncode if process else None
-                
-                # Log command output
+            if stderr:
                 stderr_text = stderr.decode().strip()
-                if stderr_text:
+                if stderr_text:  # Only log if there's actual content
                     self.logger.warning(f"Katana stderr output:\n{stderr_text}")
+            
+            if process.returncode != 0:
+                self.logger.error(f"Katana command failed with code {process.returncode}")
+                return None
                 
-                stdout_text = stdout.decode().strip()
-                if stdout_text:
-                    self.logger.debug(f"Katana stdout first 1000 chars:\n{stdout_text[:1000]}")
-                else:
-                    self.logger.warning("Katana produced no stdout output")
-            except asyncio.CancelledError:
-                self.logger.warning("Katana command cancelled")
-                if process:
-                    process.terminate()
-                    try:
-                        await asyncio.wait_for(process.wait(), timeout=5)
-                    except asyncio.TimeoutError:
-                        process.kill()
-                raise
-            finally:
-                self._current_process = None  # Clear for cleanup
-            
-            if returncode is None:
-                self.logger.error("Process terminated without returncode")
-                return []
-            if returncode != 0:
-                self.logger.error(f"Katana command failed: {stderr.decode().strip()}")
-                return []
-            
-            results = []
-            stdout_lines = stdout.decode().splitlines()
-            self.logger.info(f"Raw katana output ({len(stdout_lines)} lines):")
-            for i, line in enumerate(stdout_lines):
-                if line.strip():
-                    self.logger.info(f"Line {i}: {line[:200]}...")  # Log first 200 chars of each line
-                    try:
-                        result = json.loads(line)
-                        if 'raw' in result:
-                            del result['raw']  # Remove raw field before processing
-                        results.append(result)
-                    except json.JSONDecodeError:
-                        self.logger.error(f"Failed to parse JSON from line {i}: {line[:200]}...")
-                        continue
-            
-            self.logger.info(f"Successfully parsed {len(results)} JSON results from katana output")
-            return results
+            return stdout.decode() if stdout else None
             
         except asyncio.TimeoutError:
             self.logger.error(f"Command timed out after {timeout} seconds")
-            return []
+            if process:
+                process.kill()
+            return None
         except Exception as e:
             self.logger.error(f"Error executing command: {str(e)}")
-            return []
+            if process:
+                process.kill()
+            return None
+        finally:
+            self._current_process = None
 
-    def _parse_result(self, result: Dict, source: str) -> KatanaResult:
-        """Parse raw katana result."""
-        parsed_url = urlparse(result.get('endpoint', ''))
-        # self.logger.info(f"Parsing result for {result}")
+    def _parse_json_lines(self, stdout: str) -> List[Dict]:
+        """Parse JSON lines from stdout."""
+        results = []
+        for line in stdout.splitlines():
+            if not line.strip():
+                continue
+                
+            try:
+                result = json.loads(line)
+                results.append(result)
+            except json.JSONDecodeError as e:
+                self.logger.error(f"Failed to parse JSON line: {str(e)}")
+                continue
+                
+        return results
+
+    def _parse_result(self, result: Dict) -> KatanaResult:
+        """Parse raw katana result into KatanaResult object."""
+        endpoint = result.get('endpoint', '')
+        parsed_url = urlparse(endpoint)
+        self.logger.debug(f"parsed_url11111: {parsed_url}")   
         
-        # Extract query parameters if present
+        # Extract query parameters
         parameters = {}
         if parsed_url.query:
             parameters['query'] = dict(parse_qsl(parsed_url.query))
         if result.get('form_data'):
             parameters['form_data'] = result.get('form_data')
 
-        # Construct the request context
-        request_data = {
-            'method': result.get('method', 'GET'),
-            'endpoint': result.get('endpoint', ''),
-            'tag': result.get('tag', ''),
-            'attribute': result.get('attribute', ''),
-            'source': result.get('source', '')
-        }
-
         return KatanaResult(
             timestamp=result.get('timestamp', datetime.utcnow().isoformat()),
-            request=request_data,
-            url=result.get('endpoint', ''),  # For compatibility
-            method=request_data['method'],
+            url=endpoint,
+            method=result.get('method', 'GET'),
+            tag=result.get('tag', ''),
+            attribute=result.get('attribute', ''),
+            source=result.get('source', ''),
             status_code=result.get('status-code'),
             content_type=result.get('content-type'),
             response_size=result.get('response-size'),
             parameters=parameters,
             headers=result.get('headers', {}),
-            response_body=result.get('response', None)
+            response_body=result.get('response', '')
         )
-
-    def _deduplicate_results(self, results: List[KatanaResult]) -> List[KatanaResult]:
-        """Remove duplicate results."""
-        seen = set()
-        unique_results = []
-        
-        for result in results:
-            key = (result.url, result.method)
-            if key not in seen:
-                seen.add(key)
-                unique_results.append(result)
-        return unique_results

@@ -138,8 +138,7 @@ class ScanCoordinator:
                 session = DatabaseSession()
                 self._db_session = session
             
-            # Inspect database tables
-            session.inspect_tables()
+
             
             query = session.query(Subdomain).filter(
                 Subdomain.is_alive == True,
