@@ -24,6 +24,7 @@ class Crawler:
         self.logger.info(f"Starting crawl for {target_url}")
         try:
             results = await self.katana.crawl_all(target_url)
+            self.logger.info(f"1111111111111 {results[0]}")
             await self._process_results(results, is_authenticated)
             
         except Exception as e:
@@ -108,12 +109,12 @@ class Crawler:
     def _create_endpoint(self, result: KatanaResult, is_authenticated: bool) -> Endpoint:
         """Create Endpoint record from a KatanaResult"""
         try:
-            url_components = self._parse_url_components(result.url)
-            self.logger.debug(f"Creating endpoint record for URL: {result.url}")
-            
+            url_components = self._parse_url_components(result.endpoint)
+            self.logger.debug(f"Creating endpoint record for endpoint: {result.endpoint}")
+            self.logger.info(f"URL components: {result}")
             # Ensure required fields have values
-            if not result.url:
-                raise ValueError("URL cannot be empty")
+            if not result.endpoint:
+                raise ValueError("endpoint cannot be empty")
             if not url_components['domain']:
                 raise ValueError("Domain cannot be empty")
                 

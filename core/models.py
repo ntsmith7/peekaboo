@@ -89,12 +89,14 @@ class JavaScript(Base):
 class KatanaResult:
     """Data class for storing Katana crawler results"""
     timestamp: str                # ISO format timestamp
-    request: Dict                 # Contains method, endpoint, tag, attribute, source
-    url: str                      # Full URL (added for compatibility)
+    url: str                      # Full URL/endpoint
     method: str                   # HTTP method
+    tag: str                      # HTML element tag
+    attribute: str                # Element attribute
+    source: str                   # Source page URL
     status_code: Optional[int]    # Response status
     content_type: Optional[str]   # Response content type
     response_size: Optional[int]  # Response size in bytes
-    parameters: Dict              # URL/form parameters
-    headers: Dict                 # Response headers
-    response_body: Optional[str]  # Response content
+    parameters: Dict[str, Dict]   # URL/form parameters
+    headers: Dict[str, str]       # Response headers
+    response_body: Optional[str] = None  # Response body if available
