@@ -1,70 +1,54 @@
-from datetime import datetime
-from time import sleep
-from typing import List, Optional, Dict, TYPE_CHECKING
-from urllib.parse import urlparse, parse_qsl
-
-if TYPE_CHECKING:
-    from core.models import KatanaResult
 import asyncio
 import logging
+from datetime import datetime
+from typing import List, Dict, Optional
+from urllib.parse import urlparse
 
-from core.models import Subdomain, Endpoint, JavaScript, EndpointSource
-from .katana import KatanaCrawler
+from core.models import Subdomain, Endpoint, JavaScript, KatanaResult
 from infrastrucutre.database import DatabaseSession
+from .crawler import KatanaCrawler
+from .parser import KatanaParser
+from .js_analyzer import JavaScriptAnalyzer
 
 class CrawlingService:
-    """Service for managing web crawling operations."""
+    """Orchestrates crawling operations."""
+    
     def __init__(self, db_session: DatabaseSession):
+        """Initialize the crawling service."""
         self.session = db_session
         self.logger = logging.getLogger(__name__)
+        self.crawler = KatanaCrawler()
+        self.parser = KatanaParser()
+        self.js_analyzer = JavaScriptAnalyzer()
         self.max_concurrent_crawls = 5
         self.crawl_semaphore = asyncio.Semaphore(self.max_concurrent_crawls)
-        self.katana = None  # Initialize in async setup
         self._cleanup_lock = asyncio.Lock()
         self._is_closed = False
 
     async def __aenter__(self):
-        """Async context manager entry"""
-        await self.setup()
+        """Async context manager entry."""
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Async context manager exit"""
-        await self.cleanup()
+        """Async context manager exit."""
+        await self.close()
 
-    async def setup(self):
-        """Initialize async resources"""
-        if not self.katana:
-            self.katana = KatanaCrawler()
-        self._is_closed = False
-
-    async def cleanup(self):
-        """Cleanup async resources"""
+    async def close(self):
+        """Cleanup resources."""
         async with self._cleanup_lock:
             if self._is_closed:
                 return
-
-            self.logger.debug("Starting CrawlingService cleanup")
             try:
-                if self.katana:
-                    await asyncio.wait_for(self.katana.close(), timeout=5)
+                if hasattr(self, 'crawler'):
+                    await self.crawler.close()
                 self._is_closed = True
-                self.logger.debug("CrawlingService cleanup completed")
-            except asyncio.TimeoutError:
-                self.logger.error("Timeout during CrawlingService cleanup")
             except Exception as e:
-                self.logger.error(f"Error during CrawlingService cleanup: {str(e)}")
+                self.logger.error(f"Error during cleanup: {str(e)}")
 
     async def crawl_specific_targets(self, subdomain_ids: List[int]):
         """Crawl specific subdomains by their IDs."""
-        if self._is_closed:
-            raise RuntimeError("CrawlingService is closed")
-
-        self.logger.info(f"Starting crawl for {len(subdomain_ids)} subdomains")
-
         try:
-            await self.setup()  # Ensure resources are initialized
-            subdomains = self.session.query(Subdomain).filter(
+            subdomains = self.session.session.query(Subdomain).filter(
                 Subdomain.id.in_(subdomain_ids)
             ).all()
 
@@ -78,168 +62,150 @@ class CrawlingService:
             success_count = sum(1 for r in results if not isinstance(r, Exception))
             self.logger.info(f"Completed crawling {success_count}/{len(tasks)} subdomains")
 
-            for sub, result in zip(subdomains, results):
-                if isinstance(result, Exception):
-                    self.logger.error(f"Failed to crawl {sub.domain}: {str(result)}")
-
         except Exception as e:
             self.logger.error(f"Error in crawl_specific_targets: {str(e)}")
             raise
 
     async def _crawl_subdomain(self, subdomain: Subdomain):
         """Crawl a single subdomain."""
-        if self._is_closed:
-            raise RuntimeError("CrawlingService is closed")
-
         async with self.crawl_semaphore:
+            url = f"https://{subdomain.domain}"
+            
             try:
-                url = f"https://{subdomain.domain}"
-                self.logger.info(f"Crawling: {url}")
-
-                try:
-                    results = await asyncio.wait_for(
-                        self.katana.crawl_all(url),
-                        timeout=180
-                    )
-                except asyncio.CancelledError:
-                    self.logger.warning(f"Crawl cancelled for {url}")
-                    raise
-                except asyncio.TimeoutError:
-                    self.logger.error(f"Crawl timed out for {url}")
+                # Get raw output from crawler
+                raw_output = await self.crawler.crawl(url, timeout=180)
+                if not raw_output:
                     return
-
+                
+                # Parse results
+                results = self.parser.parse_output(raw_output)
                 if not results:
-                    self.logger.warning(f"No results for {subdomain.domain}")
                     return
-
+                
+                # Process and store results
                 await self._process_results(subdomain.id, results)
-
-                # Update last_checked
+                
+                # Update subdomain
                 subdomain.last_checked = datetime.utcnow()
-                self.session.commit()
-
-            except asyncio.TimeoutError:
-                self.logger.error(f"Timeout crawling {subdomain.domain}")
+                self.session.session.commit()
+                
             except Exception as e:
-                self.logger.error(f"Error crawling {subdomain.domain}: {str(e)}")
+                self.logger.error(f"Error crawling {url}: {str(e)}")
                 raise
 
-    def _parse_url_components(self, url: str) -> Dict:
-        """Parse URL into components for storage"""
-        self.logger.info(f"TESTING_1: {url}")
-        parsed = urlparse(url)
-        path_parts = [p for p in parsed.path.split('/') if p]
-
-        return {
-            'full_url': url,
-            'domain': parsed.netloc,
-            'path_segments': path_parts,
-            'endpoint_type': path_parts[0] if path_parts else None,
-            'resource_id': path_parts[1] if len(path_parts) > 1 else None
-        }
-
-    def _create_endpoint_record(self, subdomain_id: int, result: 'KatanaResult') -> Endpoint:
-        """Create an Endpoint record from a KatanaResult"""
-        url_components = self._parse_url_components(result)
-        self.logger.info(f"TESTING_2: {result}")
-
-        # Ensure required fields have values
-        if not result.url:
-            raise ValueError("URL cannot be empty")
-        if not url_components['domain']:
-            raise ValueError("Domain cannot be empty")
-
-        # Convert path_segments to empty list if None
-        if url_components['path_segments'] is None:
-            url_components['path_segments'] = []
-
-        # Ensure parameters is a dict
-        parameters = result.parameters if result.parameters else {}
-
-        # Create endpoint with validated data
-        endpoint = Endpoint(
-            subdomain_id=subdomain_id,
-            **url_components,  # Unpacks full_url, domain, path_segments, etc.
-
-            # Discovery context
-            source_page=result.request.get('source', ''),
-            discovery_tag=result.request.get('tag', ''),
-            discovery_attribute=result.request.get('attribute', ''),
-            discovery_time=datetime.fromisoformat(result.timestamp),
-
-            # Request/Response data
-            method=result.method or 'GET',
-            content_type=result.content_type,
-            status_code=result.status_code,
-            response_size=result.response_size,
-            parameters=parameters,
-            is_authenticated=False,
-            additional_info={
-                'headers': result.headers or {},
-                'response_body': result.response_body
-            }
-        )
-
-        # Validate required fields
-        if not endpoint.full_url or not endpoint.domain:
-            raise ValueError(f"Missing required fields for endpoint: {endpoint.__dict__}")
-
-        return endpoint
-
-    def _create_js_record(self, subdomain_id: int, result: 'KatanaResult') -> JavaScript:
-        """Create a JavaScript record from a KatanaResult"""
-        return JavaScript(
-            subdomain_id=subdomain_id,
-            url=result.url,
-            file_hash=None,
-            endpoints_referenced=[],
-            variables={},
-            discovery_time=datetime.utcnow(),
-            last_modified=None
-        )
-
-    async def _process_results(self, subdomain_id: int, results: List['KatanaResult']):
+    async def _process_results(self, subdomain_id: int, results: List[KatanaResult]):
         """Process and store crawl results."""
         try:
             endpoints = []
             js_files = []
 
+            # Process non-JS files first
             for result in results:
-                if result.url.endswith('.js'):
-                    js_files.append(self._create_js_record(subdomain_id, result))
-                else:
+                if not result.url.endswith('.js'):
                     endpoints.append(self._create_endpoint_record(subdomain_id, result))
 
-            # Log what we're about to save
+            # Process JS files concurrently
+            js_tasks = [
+                self._create_js_record(subdomain_id, result)
+                for result in results
+                if result.url.endswith('.js')
+            ]
+            if js_tasks:
+                js_results = await asyncio.gather(*js_tasks, return_exceptions=True)
+                for js_result in js_results:
+                    if isinstance(js_result, Exception):
+                        self.logger.error(f"Error processing JS file: {str(js_result)}")
+                    elif js_result:  # Skip None results
+                        js_files.append(js_result)
+
             if endpoints:
                 self.logger.info(f"Saving {len(endpoints)} endpoints")
-                for endpoint in endpoints:
-                    self.logger.debug(f"Endpoint: {endpoint.full_url}")
-                try:
-                    self.session.bulk_save_objects(endpoints)
-                except Exception as e:
-                    self.logger.error(f"Failed to save endpoints: {str(e)}")
-                    raise
+                self.session.session.add_all(endpoints)
 
             if js_files:
                 self.logger.info(f"Saving {len(js_files)} JavaScript files")
-                for js in js_files:
-                    self.logger.debug(f"JavaScript: {js.url}")
-                try:
-                    self.session.bulk_save_objects(js_files)
-                except Exception as e:
-                    self.logger.error(f"Failed to save JavaScript files: {str(e)}")
-                    raise
+                self.session.session.add_all(js_files)
 
             try:
-                self.session.commit()
-                self.logger.info("Successfully committed all changes to database")
+                self.session.session.commit()
             except Exception as e:
-                self.logger.error(f"Failed to commit changes: {str(e)}")
-                self.session.rollback()
+                self.logger.error(f"Error saving to database: {str(e)}")
+                self.session.session.rollback()
                 raise
 
         except Exception as e:
             self.logger.error(f"Error processing results: {str(e)}")
-            self.session.rollback()
+            self.session.session.rollback()
             raise
+
+    def _create_endpoint_record(self, subdomain_id: int, result: KatanaResult) -> Endpoint:
+        """Create an Endpoint record from a KatanaResult."""
+        if not result.url:
+            raise ValueError("url cannot be None")
+        
+        parsed = urlparse(result.url)
+        if not parsed.netloc:
+            raise ValueError("domain cannot be None")
+            
+        path_segments = [p for p in parsed.path.split('/') if p]
+
+        # Create endpoint with validated fields
+        endpoint = Endpoint(
+            subdomain_id=subdomain_id,
+            full_url=result.url or '',  # nullable=False
+            domain=parsed.netloc or '',  # nullable=False
+            path_segments=path_segments or [],  # JSON field
+            endpoint_type=path_segments[0] if path_segments else '',  # String field
+            resource_id=path_segments[1] if len(path_segments) > 1 else '',  # String field
+            source_page=result.source or '',  # String field
+            discovery_tag=result.tag or '',  # String field
+            discovery_attribute=result.attribute or '',  # String field
+            discovery_time=datetime.fromisoformat(result.timestamp),  # Has default
+            method=result.method or 'GET',  # String field
+            status_code=result.status_code or 0,  # Integer field
+            content_type=result.content_type or '',  # String field
+            response_size=result.response_size or 0,  # Integer field
+            parameters=result.parameters or {},  # JSON field
+            is_authenticated=False,  # Boolean field
+            additional_info={'headers': result.headers or {}}  # JSON field
+        )
+        
+        # Log the created endpoint for debugging
+        self.logger.debug(f"Created endpoint record: subdomain_id={subdomain_id}, url={result.url}")
+        
+        return endpoint
+
+    async def _create_js_record(self, subdomain_id: int, result: KatanaResult) -> Optional[JavaScript]:
+        """Create a JavaScript record from a KatanaResult."""
+        if not result.url:
+            raise ValueError("url cannot be None")
+            
+        # Use response_body directly
+        if not result.response_body:
+            self.logger.warning(f"No JS content in response body from {result.url}")
+            return None
+            
+        # Analyze JS content
+        try:
+            # First analyze the content
+            analysis_result = self.js_analyzer.analyze(
+                content=result.response_body,
+                source_url=result.url
+            )
+            
+            # Then create the models from the analysis
+            js_file, endpoints = self.js_analyzer.create_models(
+                analysis_result=analysis_result,
+                subdomain_id=subdomain_id
+            )
+            
+            # Store discovered endpoints
+            if endpoints:
+                self.logger.info(f"Found {len(endpoints)} endpoints in {result.url}")
+                self.session.session.add_all(endpoints)
+                
+            return js_file
+            
+        except Exception as e:
+            self.logger.error(f"Error analyzing JS from {result.url}: {str(e)}")
+            return None
