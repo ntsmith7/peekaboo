@@ -10,17 +10,15 @@ import uuid
 from datetime import datetime
 from urllib.parse import urlparse
 
-from .utils import clean_target_url
 from infrastrucutre.database import DatabaseSession
 from infrastrucutre.logging_config import get_logger
-from core.models import Subdomain
 
 
 class SubdomainDiscovery:
     """
     Unified class for subdomain discovery combining passive and active techniques.
     """
-    def __init__(self, target: str, db_session: DatabaseSession, rate_limit=5):
+    def __init__(self, target: str, db_session: DatabaseSession, subdomain_model, clean_target_url_func, rate_limit=5):
         self.logger = get_logger(__name__)
         self.session = db_session
         self.id = uuid.uuid4()
@@ -30,7 +28,8 @@ class SubdomainDiscovery:
         self.resolver = None
         self.rate_limit = rate_limit
         self.semaphore = asyncio.Semaphore(rate_limit)
-        self.target = clean_target_url(target)
+        self.target = clean_target_url_func(target)
+        self.subdomain_model = subdomain_model
         self._cleanup_lock = asyncio.Lock()
         self._is_closed = False
         self.logger.info(f"Initialized SubdomainDiscovery for target: {self.target} with rate limit: {rate_limit}")
@@ -281,7 +280,7 @@ class SubdomainDiscovery:
             })
 
             # Check if subdomain already exists
-            existing = self.session.query(Subdomain).filter(Subdomain.domain == domain).first()
+            existing = self.session.session.query(self.subdomain_model).filter(self.subdomain_model.domain == domain).first()
             
             if existing:
                 # Update existing record
@@ -294,7 +293,7 @@ class SubdomainDiscovery:
                 existing.last_checked = None  # Reset to trigger crawl
             else:
                 # Create new record
-                subdomain = Subdomain(
+                subdomain = self.subdomain_model(
                     domain=domain,
                     source=source,
                     ip_addresses=ip_addresses,
@@ -304,13 +303,13 @@ class SubdomainDiscovery:
                     discovery_time=current_time,
                     last_checked=None  # Reset to trigger crawl
                 )
-                self.session.add(subdomain)
+                self.session.session.add(subdomain)
             
             try:
-                self.session.commit()
+                self.session.session.commit()
             except Exception as e:
                 self.logger.error(f"Database error for {domain}: {str(e)}")
-                self.session.rollback()
+                self.session.session.rollback()
                 raise
 
             # Log validation results

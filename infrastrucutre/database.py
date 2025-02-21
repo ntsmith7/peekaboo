@@ -6,16 +6,39 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Create SQLite engine
-engine = create_engine('sqlite:///subdomains.db', echo=False)
+# Create SQLite engine with naming convention for constraints
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.schema import MetaData
+
+# Define naming convention for constraints
+convention = {
+    "ix": 'ix_%(column_0_label)s',
+    "uq": "uq_%(table_name)s_%(column_0_name)s",
+    "ck": "ck_%(table_name)s_%(constraint_name)s",
+    "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
+    "pk": "pk_%(table_name)s"
+}
+
+# Create metadata with naming convention
+metadata = MetaData(naming_convention=convention)
+
+# Create base class for declarative models
+Base = declarative_base(metadata=metadata)
+
+# Create SQLite engine with auto-increment settings
+engine = create_engine(
+    'sqlite:///subdomains.db',
+    echo=False,
+    connect_args={
+        'isolation_level': None,  # This enables autocommit mode
+        'check_same_thread': False  # Allow multi-threaded access
+    }
+)
 
 def init_database():
     """Initialize database and create tables"""
-    from core.models import Base
     logger.info("Initializing database...")
-    
     Base.metadata.create_all(engine)
-    
 
 
 # Create session factory
@@ -106,6 +129,14 @@ class DatabaseSession:
         """Add object to the session"""
         self.session.add(obj)
 
+    def add_all(self, objects):
+        """Add multiple objects to the session"""
+        try:
+            self.session.add_all(objects)
+        except Exception as e:
+            logger.error(f"Error adding objects: {str(e)}")
+            self.session.rollback()
+            raise
 
 class DatabaseManager:
     """
@@ -125,17 +156,6 @@ class DatabaseManager:
         finally:
             session.close()
 
-    def save_subdomain(self, session, subdomain_data):
-        """Save subdomain data to database"""
-        from core.models import Subdomain
-        subdomain = Subdomain(
-            domain=subdomain_data['domain'],
-            source=subdomain_data['source'],
-            ip_addresses=subdomain_data['ip_addresses'],
-            is_alive=subdomain_data['is_alive'],
-            is_takeover_candidate=subdomain_data['is_takeover_candidate'],
-            http_status=subdomain_data['http_status'],
-            discovery_time=datetime.fromisoformat(subdomain_data['discovery_time']),
-            last_checked=datetime.fromisoformat(subdomain_data['last_checked'])
-        )
-        session.add(subdomain)
+    def save_object(self, session, obj):
+        """Save any database object"""
+        session.add(obj)
