@@ -1,4 +1,3 @@
-# scanner/core/coordinator.py
 from datetime import datetime
 from typing import List, Dict, Optional
 import asyncio
@@ -6,8 +5,8 @@ import logging
 from contextlib import asynccontextmanager
 
 from discovery.scanner import SubdomainDiscovery
-from discovery.utils import clean_target_url
-from crawling import service
+from core.utils import clean_target_url
+from crawling.service import CrawlingService
 from core.models import Subdomain, Endpoint, JavaScript
 from infrastrucutre.database import DatabaseSession
 
@@ -111,6 +110,8 @@ class ScanCoordinator:
                 discoverer = SubdomainDiscovery(
                     target=self.target,
                     db_session=session,
+                    subdomain_model=Subdomain,
+                    clean_target_url_func=clean_target_url,
                     rate_limit=10
                 )
                 async with discoverer:
@@ -177,7 +178,7 @@ class ScanCoordinator:
             
             try:
                 # Initialize crawling service with context manager
-                crawler = service.CrawlingService(session)
+                crawler = CrawlingService(session)
                 async with crawler:
                     self.logger.info("Initialized CrawlingService")
                     
@@ -237,6 +238,8 @@ class ScanCoordinator:
         discoverer = SubdomainDiscovery(
             target=self.target,
             db_session=self._db_session,
+            subdomain_model=Subdomain,
+            clean_target_url_func=clean_target_url,
             rate_limit=10  # Increased rate limit for faster discovery
         )
         
@@ -282,7 +285,7 @@ class ScanCoordinator:
         
         if session:
             # Use provided session directly
-            crawler = service.CrawlingService(session)
+            crawler = CrawlingService(session)
             async with crawler:
                 subdomain_ids = [sub.id for sub in subdomains]
                 self.logger.info(f"Starting crawl for {len(subdomain_ids)} subdomain IDs")
@@ -296,7 +299,7 @@ class ScanCoordinator:
         else:
             # Create new session if none provided
             async with self._db_context() as current_session:
-                crawler = service.CrawlingService(current_session)
+                crawler = CrawlingService(current_session)
                 async with crawler:
                     subdomain_ids = [sub.id for sub in subdomains]
                     self.logger.info(f"Starting crawl for {len(subdomain_ids)} subdomain IDs")

@@ -66,6 +66,8 @@ try:
     from discovery.scanner import SubdomainDiscovery
     from core.coordinator import ScanCoordinator
     from crawling.service import CrawlingService
+    from crawling.crawler import KatanaCrawler
+    from crawling.parser import KatanaParser
 except ImportError as e:
     logger.error(f"Failed to import required modules: {str(e)}")
     sys.exit(1)

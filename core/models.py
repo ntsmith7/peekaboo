@@ -13,9 +13,7 @@ from sqlalchemy import (
     ForeignKey,
 )
 
-from sqlalchemy.ext.declarative import declarative_base
-
-Base = declarative_base()
+from infrastrucutre.database import Base
 
 
 class SubdomainSource(enum.Enum):
@@ -28,6 +26,7 @@ class SubdomainSource(enum.Enum):
 
 class Subdomain(Base):
     __tablename__ = 'subdomains'
+    __table_args__ = {'sqlite_autoincrement': True}
     id = Column(Integer, primary_key=True)
     domain = Column(String, nullable=False)
     source = Column(Enum(SubdomainSource))
@@ -48,6 +47,7 @@ class EndpointSource(enum.Enum):
 
 class Endpoint(Base):
     __tablename__ = 'endpoints'
+    __table_args__ = {'sqlite_autoincrement': True}
     id = Column(Integer, primary_key=True)
     subdomain_id = Column(Integer, ForeignKey('subdomains.id'))
     
@@ -75,6 +75,7 @@ class Endpoint(Base):
 
 class JavaScript(Base):
     __tablename__ = 'javascript_files'
+    __table_args__ = {'sqlite_autoincrement': True}
     id = Column(Integer, primary_key=True)
     subdomain_id = Column(Integer, ForeignKey('subdomains.id'))
     url = Column(String, nullable=False)
