@@ -143,14 +143,13 @@ class KatanaCrawler:
             except json.JSONDecodeError as e:
                 self.logger.error(f"Failed to parse JSON line: {str(e)}")
                 continue
-                
+
         return results
 
     def _parse_result(self, result: Dict) -> KatanaResult:
         """Parse raw katana result into KatanaResult object."""
         endpoint = result.get('endpoint', '')
         parsed_url = urlparse(endpoint)
-        self.logger.debug(f"parsed_url11111: {parsed_url}")   
         
         # Extract query parameters
         parameters = {}
