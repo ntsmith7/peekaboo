@@ -13,10 +13,11 @@ from sqlalchemy import (
     ForeignKey,
 )
 
-from infrastrucutre.database import Base
+from infrastructure.database import Base
 
 
 class SubdomainSource(enum.Enum):
+    BASE = "base"
     CERTIFICATE = "certificate"
     DNS = "dns_enumeration"
     WAYBACK = "wayback"

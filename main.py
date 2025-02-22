@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 # Import and setup logging first
-from infrastrucutre.logging_config import setup_logging
+from infrastructure.logging_config import setup_logging
 logger = setup_logging(logging.INFO)
 
 def flush_logging_handlers():
@@ -56,14 +56,14 @@ try:
         sys.exit(1)
     
     # Initialize database
-    from infrastrucutre.database import init_database, DatabaseSession
+    from infrastructure.database import init_database, DatabaseSession
     logger.info("Initializing database...")
     init_database()
     logger.info("Database initialization complete")
     
     # Now import the rest of the modules
     logger.info("Loading system modules...")
-    from discovery.scanner import SubdomainDiscovery
+    from discovery.discovery import SubdomainDiscovery
     from core.coordinator import ScanCoordinator
     from crawling.service import CrawlingService
     from crawling.crawler import KatanaCrawler

@@ -1,5 +1,5 @@
 from .database import DatabaseSession, DatabaseManager
-from infrastrucutre.logging_config import setup_logging, get_logger
+from infrastructure.logging_config import setup_logging, get_logger
 
 __all__ = [
     'DatabaseSession', 

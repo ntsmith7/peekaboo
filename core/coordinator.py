@@ -4,11 +4,11 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from discovery.scanner import SubdomainDiscovery
+from discovery.discovery import SubdomainDiscovery
 from core.utils import clean_target_url
 from crawling.service import CrawlingService
 from core.models import Subdomain, Endpoint, JavaScript
-from infrastrucutre.database import DatabaseSession
+from infrastructure.database import DatabaseSession
 
 
 class ScanCoordinator:

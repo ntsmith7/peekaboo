@@ -1,5 +1,5 @@
 import asyncio
-from infrastrucutre.database import DatabaseSession
+from infrastructure.database import DatabaseSession
 from crawling import service
 from core.models import Subdomain
 

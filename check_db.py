@@ -1,4 +1,4 @@
-from infrastrucutre.database import engine
+from infrastructure.database import engine
 from sqlalchemy import text
 
 def check_database():

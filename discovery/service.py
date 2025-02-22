@@ -83,14 +83,15 @@ class SubdomainDiscoveryService:
             status = status_result[0] if status_result else None
             
             # Store results
+            from core.models import SubdomainSource  # Import where needed
             result = {
                 'domain': domain,
-                'source': source,
+                'source': SubdomainSource[source],
                 'ip_addresses': ips,
                 'is_alive': bool(ips),
                 'http_status': status,
                 'is_takeover_candidate': takeover,
-                'discovery_time': datetime.utcnow().isoformat(),
+                'discovery_time': datetime.utcnow(),
                 'last_checked': None
             }
             

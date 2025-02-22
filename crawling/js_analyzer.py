@@ -7,7 +7,7 @@ from datetime import datetime
 from urllib.parse import urljoin, urlparse
 
 from core.models import JavaScript, Endpoint, EndpointSource
-from infrastrucutre.database import DatabaseSession
+from infrastructure.database import DatabaseSession
 
 @dataclass
 class JavaScriptAnalysisResult:

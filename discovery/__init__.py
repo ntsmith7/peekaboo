@@ -1,5 +1,5 @@
 from typing import Optional
-from infrastrucutre.database import DatabaseSession
+from infrastructure.database import DatabaseSession
 from .service import SubdomainDiscoveryService
 from .network import NetworkOperations
 from .scanner import SubdomainScanner

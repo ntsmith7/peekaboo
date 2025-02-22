@@ -5,7 +5,7 @@ from typing import List, Dict, Optional
 from urllib.parse import urlparse
 
 from core.models import Subdomain, Endpoint, JavaScript, KatanaResult
-from infrastrucutre.database import DatabaseSession
+from infrastructure.database import DatabaseSession
 from .crawler import KatanaCrawler
 from .parser import KatanaParser
 from .js_analyzer import JavaScriptAnalyzer
