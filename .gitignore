@@ -1,0 +1,24 @@
+# Log files
+logs/scanner.log
+*.log
+
+# General log patterns (for future protection)
+logs/
+*.log.*
+log/
+/logs/*
+/log/*
+
+# System files that often should be ignored
+.DS_Store
+.env
+.env.*
+node_modules/
+dist/
+build/
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
