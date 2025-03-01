@@ -74,6 +74,23 @@ class Endpoint(Base):
     is_authenticated = Column(Boolean)         # Found while authenticated?
     additional_info = Column(JSON)             # Extra metadata
 
+class VulnerabilityType(enum.Enum):
+    XSS = "xss"
+    # Future types can be added here
+
+class Vulnerability(Base):
+    __tablename__ = 'vulnerabilities'
+    __table_args__ = {'sqlite_autoincrement': True}
+    id = Column(Integer, primary_key=True)
+    endpoint_id = Column(Integer, ForeignKey('endpoints.id'))
+    type = Column(Enum(VulnerabilityType))
+    parameter = Column(String)
+    payload = Column(String)
+    proof = Column(String)
+    severity = Column(String)
+    discovery_time = Column(DateTime, default=datetime.utcnow)
+    additional_info = Column(JSON)
+
 class JavaScript(Base):
     __tablename__ = 'javascript_files'
     __table_args__ = {'sqlite_autoincrement': True}

@@ -6,8 +6,8 @@ from contextlib import asynccontextmanager
 
 from discovery.discovery import SubdomainDiscovery
 from core.utils import clean_target_url
-from crawling.service import CrawlingService
-from core.models import Subdomain, Endpoint, JavaScript
+# Import CrawlingService and XSSScanner lazily to avoid circular imports
+from core.models import Subdomain, Endpoint, JavaScript, Vulnerability, VulnerabilityType
 from infrastructure.database import DatabaseSession
 
 
@@ -25,6 +25,7 @@ class ScanCoordinator:
         self.completion_time = None
         self.total_subdomains = 0
         self.crawled_subdomains = 0
+        self.vulnerabilities_found = 0
         self._db_session = db_session
 
     @asynccontextmanager
@@ -163,6 +164,20 @@ class ScanCoordinator:
             if not new_active_subdomains:
                 self.logger.info("No new active subdomains to crawl")
                 return self._generate_scan_report(session)
+
+            # Phase 3: Vulnerability Scanning
+            self.logger.info("Starting Phase 3: Vulnerability Scanning")
+            try:
+                await asyncio.wait_for(
+                    self._scan_vulnerabilities(session),
+                    timeout=900  # 15 minute timeout for vulnerability scanning
+                )
+            except asyncio.TimeoutError:
+                self.logger.error("Vulnerability scanning phase timed out")
+                return self._generate_scan_report(session, error="Vulnerability scanning phase timed out")
+            except Exception as e:
+                self.logger.error(f"Error during vulnerability scanning: {str(e)}")
+                return self._generate_scan_report(session, error=str(e))
             
             new_count = len(new_active_subdomains)
             if self.total_subdomains > 0:
@@ -177,6 +192,9 @@ class ScanCoordinator:
             self.logger.info("=" * 60)
             
             try:
+                # Import CrawlingService here to avoid circular imports
+                from crawling.service import CrawlingService
+                
                 # Initialize crawling service with context manager
                 crawler = CrawlingService(session)
                 async with crawler:
@@ -284,6 +302,9 @@ class ScanCoordinator:
             self.logger.debug(f"Subdomain to crawl: {sub.domain} (ID: {sub.id}, Alive: {sub.is_alive})")
         
         if session:
+            # Import CrawlingService here to avoid circular imports
+            from crawling.service import CrawlingService
+            
             # Use provided session directly
             crawler = CrawlingService(session)
             async with crawler:
@@ -299,6 +320,9 @@ class ScanCoordinator:
         else:
             # Create new session if none provided
             async with self._db_context() as current_session:
+                # Import CrawlingService here to avoid circular imports
+                from crawling.service import CrawlingService
+                
                 crawler = CrawlingService(current_session)
                 async with crawler:
                     subdomain_ids = [sub.id for sub in subdomains]
@@ -311,6 +335,51 @@ class ScanCoordinator:
                         self.logger.error(f"Error during crawling phase: {str(e)}", exc_info=True)
                         raise
 
+    async def _scan_vulnerabilities(self, session: DatabaseSession) -> None:
+        """
+        Handles the vulnerability scanning phase.
+        Currently implements XSS scanning, with room for future vulnerability types.
+        """
+        self.logger.info(f"Starting vulnerability scan for {self.target}")
+        
+        try:
+            # Import XSSScanner here to avoid circular imports
+            from vulnerabilites import XSSScanner
+            
+            # Initialize XSS scanner
+            scanner = XSSScanner(session)
+            await scanner.setup()
+            
+            try:
+                # Perform XSS scan
+                findings = await scanner.scan_target(self.target)
+                
+                # Save findings to database
+                for finding in findings:
+                    vulnerability = Vulnerability(
+                        endpoint_id=finding.endpoint_id,
+                        type=VulnerabilityType.XSS,
+                        parameter=finding.parameter,
+                        payload=finding.payload,
+                        proof=finding.proof,
+                        severity=finding.severity,
+                        discovery_time=finding.discovery_time,
+                        additional_info={}
+                    )
+                    session.add(vulnerability)
+                
+                session.commit()
+                self.vulnerabilities_found = len(findings)
+                self.logger.info(f"Found {self.vulnerabilities_found} XSS vulnerabilities")
+                
+            finally:
+                # Ensure cleanup happens
+                await scanner.cleanup()
+                
+        except Exception as e:
+            self.logger.error(f"Error during vulnerability scanning: {str(e)}", exc_info=True)
+            raise
+
     def _generate_scan_report(self, session: DatabaseSession, error: Optional[str] = None) -> Dict:
         """
         Generates a comprehensive report of the scan results.
@@ -322,6 +391,7 @@ class ScanCoordinator:
         duration = (self.completion_time - self.start_time).total_seconds()
         endpoints = self._count_endpoints(session) if not error else 0
         js_files = self._count_js_files(session) if not error else 0
+        vulnerabilities = self._count_vulnerabilities(session) if not error else 0
         
         report = {
             'target': self.target,
@@ -333,7 +403,8 @@ class ScanCoordinator:
             'statistics': {
                 'live_subdomains': self.crawled_subdomains,
                 'endpoints_discovered': endpoints,
-                'js_files_found': js_files
+                'js_files_found': js_files,
+                'vulnerabilities_found': vulnerabilities
             }
         }
         
@@ -365,5 +436,11 @@ JavaScript Files: {js_files}
     def _count_js_files(self, session: DatabaseSession) -> int:
         """Counts total JavaScript files discovered during the scan"""
         return session.query(JavaScript).join(Subdomain).filter(
+            (Subdomain.domain == self.target) | (Subdomain.domain.like(f'%.{self.target}'))
+        ).count()
+        
+    def _count_vulnerabilities(self, session: DatabaseSession) -> int:
+        """Counts total vulnerabilities found during the scan"""
+        return session.query(Vulnerability).join(Endpoint).join(Subdomain).filter(
             (Subdomain.domain == self.target) | (Subdomain.domain.like(f'%.{self.target}'))
         ).count()
