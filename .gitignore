@@ -21,4 +21,4 @@ build/
 .idea/
 .vscode/
 *.swp
-*.swo
+*.swosubdomains.db
